@@ -92,7 +92,7 @@ class SmartExtractionSchema(BaseModel):
     drink_brand: str
     health_insight: str
 
-#def get_brand_price(item_type: str, brand_name: str) -> float:
+def get_brand_price(item_type: str, brand_name: str) -> float:
     """
     Looks up price dynamically from database.
     If brand is unrecognized, falls back to the 'Generic' price of that category.
