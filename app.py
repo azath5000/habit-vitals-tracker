@@ -13,7 +13,8 @@ import re
 st.set_page_config(page_title="Vitals & Wealth Tracker", layout="wide", initial_sidebar_state="expanded")
 
 # --- DATABASE ENGINE & MIGRATIONS ---
-conn = sqlite3.connect("habit_v4_advanced.db", check_same_thread=False)
+# We upgrade the database name to v5 to smoothly apply the new schema modifications
+conn = sqlite3.connect("habit_v5_advanced.db", check_same_thread=False)
 cursor = conn.cursor()
 
 # 1. Main expense transaction logger table
@@ -31,12 +32,14 @@ cursor.execute("""
 # 2. Financial Wishlist target goals table
 cursor.execute("CREATE TABLE IF NOT EXISTS goals (name TEXT, cost REAL)")
 
-# 3. Dynamic Price Book table to allow user configuration of brands & prices
+# 3. Dynamic Price Book table with Composite Primary Key (item_type, brand)
+# This permits multiple "Generic" placeholders for different classes of items
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS price_book (
         item_type TEXT,
-        brand TEXT PRIMARY KEY,
-        unit_price REAL
+        brand TEXT,
+        unit_price REAL,
+        PRIMARY KEY (item_type, brand)
     )
 """)
 
@@ -62,7 +65,7 @@ if cursor.fetchone()[0] == 0:
     cursor.execute("INSERT INTO settings VALUES ('baseline_budget', '4500.0')")
     conn.commit()
 
-# Default Brand Catalog & Price structures
+# Default Brand Catalog & Price structures (allowing duplicate brands across different types)
 cursor.execute("SELECT COUNT(*) FROM price_book")
 if cursor.fetchone()[0] == 0:
     default_prices = [
@@ -97,7 +100,7 @@ def get_brand_price(item_type: str, brand_name: str) -> float:
     Looks up price dynamically from database.
     If brand is unrecognized, falls back to the 'Generic' price of that category.
     """
-    cursor.execute("SELECT unit_price FROM price_book WHERE brand = ?", (brand_name,))
+    cursor.execute("SELECT unit_price FROM price_book WHERE item_type = ? AND brand = ?", (item_type, brand_name))
     row = cursor.fetchone()
     if row:
         return float(row[0])
