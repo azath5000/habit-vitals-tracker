@@ -1,11 +1,13 @@
 import streamlit as st
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from pydantic import BaseModel
 import sqlite3
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
+import time
 
 # --- INITIAL SETUP & THEME ---
 st.set_page_config(page_title="Vitals & Wealth Tracker", layout="wide", initial_sidebar_state="expanded")
@@ -33,7 +35,6 @@ if cursor.fetchone()[0] == 0:
     conn.commit()
 
 # --- INITIALIZE GEMINI ---
-# Ensure your GEMINI_API_KEY environment variable is set in the terminal
 client = genai.Client()
 
 class SmartExtractionSchema(BaseModel):
@@ -42,6 +43,32 @@ class SmartExtractionSchema(BaseModel):
     drinks: int
     drink_brand: str
     health_insight: str
+
+# --- ROBUST RETRY WRAPPER FOR API QUOTAS ---
+def generate_content_with_retry(model, contents, config, max_retries=3, initial_delay=5):
+    """
+    Calls the Gemini API and handles 429 Resource Exhausted errors 
+    by waiting and retrying automatically.
+    """
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+            return response
+        except APIError as e:
+            # Check for 429 Rate Limit / Resource Exhausted
+            if e.code == 429:
+                if attempt < max_retries - 1:
+                    st.warning(f"⚠️ Quota limit hit. Automatically retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    continue
+            raise e
+    raise Exception("Max retries exceeded for Gemini API due to rate limits. Please try again in a minute.")
 
 # --- CONSTANTS: BRAND PRICE BOOK ---
 PRICE_BOOK = {
@@ -79,9 +106,7 @@ with left_panel:
     st.subheader("🎙️ Instant Native Voice Logger")
     st.write("Click the record button below to log naturally (e.g., *'Had two Marlboros and a Heineken'* or *'I stayed clean today!'*):")
     
-    # 🌟 Streamlit's beautiful built-in audio recorder element
     audio_file_buffer = st.audio_input("Record your entry")
-    
     text_input = st.text_input("Or type alternative text entry here:")
     processed_text = ""
     data = None
@@ -89,20 +114,21 @@ with left_panel:
     if audio_file_buffer:
         with st.spinner("Transcribing and extracting voice parameters via Gemini..."):
             try:
-                # Direct upload to Gemini File API
                 uploaded_audio = client.files.upload(file=audio_file_buffer)
                 
-                response = client.models.generate_content(
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SmartExtractionSchema,
+                    system_instruction=(
+                        "Extract details from audio logs. Map counts. If the user indicates they stayed clean, sober, or had zero usage, output 0 for counts. "
+                        "Create an actionable, highly practical 1-sentence physical feedback note."
+                    )
+                )
+                
+                response = generate_content_with_retry(
                     model='gemini-2.0-flash',
                     contents=[uploaded_audio, "Analyze this voice log for cigarette or alcohol consumption counts and brand names."],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=SmartExtractionSchema,
-                        system_instruction=(
-                            "Extract details from audio logs. Map counts. If the user indicates they stayed clean, sober, or had zero usage, output 0 for counts. "
-                            "Create an actionable, highly practical 1-sentence physical feedback note."
-                        )
-                    )
+                    config=config
                 )
                 data = SmartExtractionSchema.model_validate_json(response.text)
                 processed_text = "Voice processed successfully!"
@@ -112,14 +138,16 @@ with left_panel:
     elif text_input and st.button("Submit Typed Log", use_container_width=True):
         with st.spinner("Analyzing text entry..."):
             try:
-                response = client.models.generate_content(
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SmartExtractionSchema,
+                    system_instruction="Extract counts and brands. Create an actionable, highly practical 1-sentence physical feedback note."
+                )
+                
+                response = generate_content_with_retry(
                     model='gemini-2.0-flash',
                     contents=text_input,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=SmartExtractionSchema,
-                        system_instruction="Extract counts and brands. Create an actionable, highly practical 1-sentence physical feedback note."
-                    )
+                    config=config
                 )
                 data = SmartExtractionSchema.model_validate_json(response.text)
                 processed_text = "Text log processed successfully!"
