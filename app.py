@@ -7,7 +7,7 @@ import sqlite3
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-import time
+import re
 
 # --- INITIAL SETUP & THEME ---
 st.set_page_config(page_title="Vitals & Wealth Tracker", layout="wide", initial_sidebar_state="expanded")
@@ -44,37 +44,66 @@ class SmartExtractionSchema(BaseModel):
     drink_brand: str
     health_insight: str
 
-# --- ROBUST RETRY WRAPPER FOR API QUOTAS ---
-def generate_content_with_retry(model, contents, config, max_retries=3, initial_delay=5):
-    """
-    Calls the Gemini API and handles 429 Resource Exhausted errors 
-    by waiting and retrying automatically.
-    """
-    delay = initial_delay
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-            return response
-        except APIError as e:
-            # Check for 429 Rate Limit / Resource Exhausted
-            if e.code == 429:
-                if attempt < max_retries - 1:
-                    st.warning(f"⚠️ Quota limit hit. Automatically retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
-                    continue
-            raise e
-    raise Exception("Max retries exceeded for Gemini API due to rate limits. Please try again in a minute.")
-
 # --- CONSTANTS: BRAND PRICE BOOK ---
 PRICE_BOOK = {
     "cigar": {"Classic": 18.0, "Marlboro": 22.0, "Dunhill": 30.0, "Generic": 18.0},
     "drink": {"Kingfisher": 160.0, "Heineken": 220.0, "Corona": 250.0, "Budweiser": 180.0, "Generic": 170.0}
 }
+
+# --- SMART LOCAL FALLBACK PARSER ---
+def parse_log_locally(text: str) -> SmartExtractionSchema:
+    """
+    Fallback parser using regex to extract parameters locally 
+    when the Gemini API free tier daily quota is completely exhausted.
+    """
+    text_lower = text.lower()
+    
+    # Check for clean entries
+    if any(word in text_lower for word in ["clean", "sober", "zero", "none", "no ", "stayed clean"]):
+        return SmartExtractionSchema(
+            cigarettes=0, cigarette_brand="None",
+            drinks=0, drink_brand="None",
+            health_insight="Offline Mode: Clean day detected! Excellent work protecting your physical health."
+        )
+    
+    # Extract numbers
+    numbers = [int(s) for s in re.findall(r'\b\d+\b', text_lower)]
+    count1 = numbers[0] if len(numbers) > 0 else 1
+    count2 = numbers[1] if len(numbers) > 1 else 1
+
+    cigar_count, drink_count = 0, 0
+    cigar_brand, drink_brand = "Generic", "Generic"
+
+    # Match Cigar Brands
+    cigar_brands = ["marlboro", "classic", "dunhill"]
+    matched_cigar_brands = [b for b in cigar_brands if b in text_lower]
+    
+    # Match Drink Brands
+    drink_brands = ["kingfisher", "heineken", "corona", "budweiser"]
+    matched_drink_brands = [b for b in drink_brands if b in text_lower]
+
+    # Simple keyword routing
+    if "marlboro" in text_lower or "classic" in text_lower or "dunhill" in text_lower or "cigar" in text_lower or "smoke" in text_lower or "cigarette" in text_lower:
+        cigar_count = count1
+        if matched_cigar_brands:
+            cigar_brand = matched_cigar_brands[0].capitalize()
+        if "beer" in text_lower or "drink" in text_lower or "heineken" in text_lower or "kingfisher" in text_lower:
+            drink_count = count2 if len(numbers) > 1 else 1
+            if matched_drink_brands:
+                drink_brand = matched_drink_brands[0].capitalize()
+    else:
+        # Default fallback assume drink if mentioned
+        drink_count = count1
+        if matched_drink_brands:
+            drink_brand = matched_drink_brands[0].capitalize()
+
+    return SmartExtractionSchema(
+        cigarettes=cigar_count,
+        cigarette_brand=cigar_brand,
+        drinks=drink_count,
+        drink_brand=drink_brand,
+        health_insight="Offline Mode Parsing: Logged successfully. (API Daily Quota Exhausted)"
+    )
 
 # --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
@@ -116,41 +145,49 @@ with left_panel:
             try:
                 uploaded_audio = client.files.upload(file=audio_file_buffer)
                 
-                config = types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=SmartExtractionSchema,
-                    system_instruction=(
-                        "Extract details from audio logs. Map counts. If the user indicates they stayed clean, sober, or had zero usage, output 0 for counts. "
-                        "Create an actionable, highly practical 1-sentence physical feedback note."
-                    )
-                )
-                
-                response = generate_content_with_retry(
+                response = client.models.generate_content(
                     model='gemini-2.0-flash',
                     contents=[uploaded_audio, "Analyze this voice log for cigarette or alcohol consumption counts and brand names."],
-                    config=config
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=SmartExtractionSchema,
+                        system_instruction=(
+                            "Extract details from audio logs. Map counts. If the user indicates they stayed clean, sober, or had zero usage, output 0 for counts. "
+                            "Create an actionable, highly practical 1-sentence physical feedback note."
+                        )
+                    )
                 )
                 data = SmartExtractionSchema.model_validate_json(response.text)
-                processed_text = "Voice processed successfully!"
+                processed_text = "Voice processed successfully via AI!"
+            except APIError as e:
+                if e.code == 429:
+                    st.warning("⚠️ API Quota completely exhausted for today. Audio files cannot be processed offline. Please use the text box below.")
+                else:
+                    st.error(f"Audio error: {e}")
             except Exception as e:
                 st.error(f"Audio processing mistake: {e}")
                 
     elif text_input and st.button("Submit Typed Log", use_container_width=True):
         with st.spinner("Analyzing text entry..."):
             try:
-                config = types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=SmartExtractionSchema,
-                    system_instruction="Extract counts and brands. Create an actionable, highly practical 1-sentence physical feedback note."
-                )
-                
-                response = generate_content_with_retry(
+                response = client.models.generate_content(
                     model='gemini-2.0-flash',
                     contents=text_input,
-                    config=config
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=SmartExtractionSchema,
+                        system_instruction="Extract counts and brands. Create an actionable, highly practical 1-sentence physical feedback note."
+                    )
                 )
                 data = SmartExtractionSchema.model_validate_json(response.text)
-                processed_text = "Text log processed successfully!"
+                processed_text = "Text log processed successfully via AI!"
+            except APIError as e:
+                if e.code == 429:
+                    # Switch seamlessly to local parsing engine
+                    data = parse_log_locally(text_input)
+                    processed_text = "Logged successfully using Offline Fallback Engine (Free-tier Quota Met)!"
+                else:
+                    st.error(f"API Error: {e}")
             except Exception as e:
                 st.error(f"Text processing mistake: {e}")
 
