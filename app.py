@@ -93,7 +93,7 @@ with left_panel:
                 uploaded_audio = client.files.upload(file=audio_file_buffer)
                 
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash',
+                    model='gemini-2.0-flash',
                     contents=[uploaded_audio, "Analyze this voice log for cigarette or alcohol consumption counts and brand names."],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -113,7 +113,7 @@ with left_panel:
         with st.spinner("Analyzing text entry..."):
             try:
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash',
+                    model='gemini-2.0-flash',
                     contents=text_input,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
