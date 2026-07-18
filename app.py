@@ -6,8 +6,6 @@ import sqlite3
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-from streamlit_mic_recorder import audio_recorder
-import io
 
 # --- INITIAL SETUP & THEME ---
 st.set_page_config(page_title="Vitals & Wealth Tracker", layout="wide", initial_sidebar_state="expanded")
@@ -16,7 +14,7 @@ st.set_page_config(page_title="Vitals & Wealth Tracker", layout="wide", initial_
 conn = sqlite3.connect("habit_v3.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
-    CREATE TABLE IF NOT EXISTS transactions (
+    CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
         item_type TEXT,
@@ -35,6 +33,7 @@ if cursor.fetchone()[0] == 0:
     conn.commit()
 
 # --- INITIALIZE GEMINI ---
+# Ensure your GEMINI_API_KEY environment variable is set in the terminal
 client = genai.Client()
 
 class SmartExtractionSchema(BaseModel):
@@ -54,7 +53,6 @@ PRICE_BOOK = {
 with st.sidebar:
     st.header("⚙️ App Settings & Goals")
     
-    # Financial Goal Settings
     st.subheader("🎯 Dream Reward Goal")
     cursor.execute("SELECT name, cost FROM goals LIMIT 1")
     current_goal = cursor.fetchone()
@@ -78,34 +76,25 @@ left_panel, right_panel = st.columns([1, 1.2])
 
 # --- LEFT PANEL: ZERO-FRICTION CAPTURE ---
 with left_panel:
-    st.subheader("🎙️ Instant Audio/Voice Logger")
-    st.write("Click the mic below and speak naturally (e.g., *'Had two Marlboros and a Heineken today'* or *'I stayed perfectly clean today!'*)")
+    st.subheader("🎙️ Instant Native Voice Logger")
+    st.write("Click the record button below to log naturally (e.g., *'Had two Marlboros and a Heineken'* or *'I stayed clean today!'*):")
     
-    # Native web microphone capture component
-    audio_bytes = audio_recorder(
-        text="Tap to Speak",
-        recording_color="#e74c3c",
-        neutral_color="#2ecc71",
-        icon_size="3x"
-    )
+    # 🌟 Streamlit's beautiful built-in audio recorder element
+    audio_file_buffer = st.audio_input("Record your entry")
     
-    # Text fallback input
     text_input = st.text_input("Or type alternative text entry here:")
-    
     processed_text = ""
+    data = None
     
-    if audio_bytes:
-        with st.spinner("Transcribing and extracting voice parameters..."):
+    if audio_file_buffer:
+        with st.spinner("Transcribing and extracting voice parameters via Gemini..."):
             try:
-                # Send raw audio buffer directly to Gemini via AI Studio for automated processing
-                audio_io = io.BytesIO(audio_bytes)
-                audio_io.name = "input.wav"
-                
-                uploaded_audio = client.files.upload(file=audio_io)
+                # Direct upload to Gemini File API
+                uploaded_audio = client.files.upload(file=audio_file_buffer)
                 
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
-                    contents=[uploaded_audio, "Analyze this voice log for cigarette/cigar or alcohol consumption counts and brand names."],
+                    contents=[uploaded_audio, "Analyze this voice log for cigarette or alcohol consumption counts and brand names."],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=SmartExtractionSchema,
@@ -116,10 +105,10 @@ with left_panel:
                     )
                 )
                 data = SmartExtractionSchema.model_validate_json(response.text)
-                processed_text = f"Voice processed successfully!"
+                processed_text = "Voice processed successfully!"
             except Exception as e:
                 st.error(f"Audio processing mistake: {e}")
-                data = None
+                
     elif text_input and st.button("Submit Typed Log", use_container_width=True):
         with st.spinner("Analyzing text entry..."):
             try:
@@ -136,11 +125,8 @@ with left_panel:
                 processed_text = "Text log processed successfully!"
             except Exception as e:
                 st.error(f"Text processing mistake: {e}")
-                data = None
-    else:
-        data = None
 
-    # Handle Database Insertion if payload extraction succeeded
+    # Handle Database Insertion
     if data:
         today = datetime.now().strftime("%Y-%m-%d")
         
@@ -153,7 +139,6 @@ with left_panel:
             cursor.execute("INSERT INTO expenses (date, item_type, brand, count, cost) VALUES (?, 'Drink', ?, ?, ?)",
                            (today, data.drink_brand, data.drinks, cost))
         
-        # Fallback tracking record for zero/clean days to maintain streak logic
         if data.cigarettes == 0 and data.drinks == 0:
             cursor.execute("INSERT INTO expenses (date, item_type, brand, count, cost) VALUES (?, 'Clean', 'None', 0, 0.0)", (today,))
             
@@ -161,31 +146,25 @@ with left_panel:
         st.toast(processed_text, icon="✅")
         st.info(f"💡 **Health Assist Alert:** {data.health_insight}")
 
-    # --- GAMIFIED SYSTEM STATE (HEALTH RECOVERY METERS) ---
+    # --- GAMIFIED HEALTH METERS ---
     st.markdown("---")
-    st.subheader("🫁 Real-time Physiological Recovery Tracker")
+    st.subheader("🫁 Physiological Recovery Tracker")
     
-    # Look back at historical clean states
     df_history = pd.read_sql_query("SELECT date, item_type FROM expenses ORDER BY date DESC", conn)
     
     clean_streak = 0
     if not df_history.empty:
-        # Simple computation check to see if today or yesterday had smoking records
         today_str = datetime.now().strftime("%Y-%m-%d")
         yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        
         recent_toxins = df_history[df_history['date'].isin([today_str, yesterday_str]) & (df_history['item_type'].isin(['Cigar', 'Drink']))]
-        if recent_toxins.empty:
-            clean_streak = 2  # Hardcoded structural simulation indicator for user motivation metrics
-        else:
-            clean_streak = 0
+        clean_streak = 0 if not recent_toxins.empty else 2
 
     if clean_streak > 0:
         st.success(f"🔥 Terrific work! You are currently sustaining a **{clean_streak}-Day Vitality Streak**.")
         oxygen_recovery = min(clean_streak * 35, 100)
         cardio_recovery = min(clean_streak * 20, 100)
     else:
-        st.warning("⚠️ Toxins detected recently. Your body biological regeneration systems are resetting.")
+        st.warning("⚠️ Toxins detected recently. Biological regeneration cycles are resetting.")
         oxygen_recovery = 12
         cardio_recovery = 8
         
@@ -194,7 +173,7 @@ with left_panel:
     st.write("**Cardiovascular Stress Decompression Status:**")
     st.progress(cardio_recovery / 100.0)
 
-# --- RIGHT PANEL: METRICS & DREAM TARGET ANALYTICS ---
+# --- RIGHT PANEL: METRICS & VISUALIZATIONS ---
 with right_panel:
     st.subheader("📊 Expense Vector Analysis")
     
@@ -203,23 +182,19 @@ with right_panel:
     if not df_analytics.empty:
         total_spent = df_analytics['cost'].sum()
         
-        # Core Dashboard Metric Row
         col_m1, col_m2 = st.columns(2)
-        col_m1.metric("Total Investment Lost", f"₹{total_spent:,.2f}", delta="- Monthly Deficit", delta_color="inverse")
+        col_m1.metric("Total Investment Lost", f"₹{total_spent:,.2f}")
         
-        # Calculate Savings Potential based on typical baseline behavior models
         theoretical_baseline = 4500.00 
         saved_diverted = max(0.0, theoretical_baseline - total_spent)
         
-        # Wishlist Goal Progress Bar Logic
         goal_name, goal_cost = new_goal_name, new_goal_cost
         progress_percentage = min((saved_diverted / goal_cost), 1.0)
         
         col_m2.metric(f"Diverted to: {goal_name}", f"₹{saved_diverted:,.2f}", f"{progress_percentage * 100:.1f}% Funded")
-        st.write(f"**Progress towards purchasing your {goal_name}:**")
+        st.write(f"**Progress towards {goal_name}:**")
         st.progress(progress_percentage)
         
-        # Segmented Pie Chart Breakdown Output
         df_analytics['Label'] = df_analytics['item_type'] + " [" + df_analytics['brand'] + "]"
         chart_summary = df_analytics.groupby('Label')['cost'].sum().reset_index()
         
@@ -233,4 +208,4 @@ with right_panel:
         )
         st.plotly_chart(pie_fig, use_container_width=True)
     else:
-        st.info("📊 Your live budget breakdown metrics and dynamic wishlist tracking elements will render here as soon as entries are entered into the database engine.")
+        st.info("📊 Your live charts and wishlist data will render here as soon as entries are recorded.")
