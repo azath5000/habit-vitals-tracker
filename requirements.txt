@@ -1,0 +1,5 @@
+google-genai
+pydantic
+plotly
+pandas
+streamlit-mic-recorder
